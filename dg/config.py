@@ -1,9 +1,29 @@
 """Configuration constants for BraTS domain-generalization experiments."""
 
+import os
+from pathlib import Path
+
+
+def _load_synapse_token() -> str:
+    """Read SYNAPSE_PAT from .secrets.env (gitignored) or environment."""
+    # Check environment variable first
+    val = os.environ.get("SYNAPSE_PAT", "")
+    if val:
+        return val
+    # Fall back to .secrets.env next to the project root
+    secrets_path = Path(__file__).resolve().parent.parent / ".secrets.env"
+    if secrets_path.exists():
+        for line in secrets_path.read_text().splitlines():
+            line = line.strip()
+            if line.startswith("SYNAPSE_PAT="):
+                return line.split("=", 1)[1].strip()
+    return ""
+
+
 # -----------------------
 # Paths
 # -----------------------
-TOKEN = ""  # Synapse Personal Access Token (PAT)
+TOKEN = _load_synapse_token()
 ZIP_PATH = "./ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData.zip"
 MAPPING_XLSX = "./BraTS2023_2017_GLI_Mapping.xlsx"
 OUT_ROOT = "./brats23_npz_dg"

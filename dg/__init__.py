@@ -18,6 +18,7 @@ High-level entry points used by the notebook:
 """
 
 from . import config, runtime
+from .consistency import consistency_report, measure_consistency, set_all_mixstyle
 from .dataset import BraTSNPZSliceDataset
 from .experiment import (
     DataSplitConfig,
@@ -45,7 +46,7 @@ from .splits import (
     split_seen_cases_by_site,
     summarize_split,
 )
-from .training import eval_epoch, eval_metrics, set_seed, train_epoch
+from .training import eval_epoch, eval_metrics, set_seed, train_epoch, train_epoch_consistency
 
 __all__ = [
     # modules
@@ -66,9 +67,14 @@ __all__ = [
     "build_site_domain_summary",
     "build_main_split",
     "summarize_split",
+    # consistency
+    "set_all_mixstyle",
+    "measure_consistency",
+    "consistency_report",
     # training
     "set_seed",
     "train_epoch",
+    "train_epoch_consistency",
     "eval_epoch",
     "eval_metrics",
     # experiment

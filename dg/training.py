@@ -7,9 +7,11 @@ import random
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from tqdm import tqdm
 
 from . import runtime
+from .consistency import set_all_mixstyle
 
 
 def set_seed(seed: int = 42) -> None:
@@ -54,6 +56,64 @@ def train_epoch(model, loader, optimizer, criterion):
         total += y.size(0)
 
     return total_loss / len(loader), correct / total
+
+
+def train_epoch_consistency(model, loader, optimizer, criterion, lambda_c: float = 0.1):
+    """Training epoch with consistency regularization.
+
+    For each batch:
+    1. Clean forward pass (MixStyle OFF) → logits_clean (detached target)
+    2. Mixed forward pass (MixStyle ON) → logits_mixed
+    3. loss = CE(logits_mixed, y) + lambda_c * KL(mixed_softmax || clean_softmax.detach())
+
+    Returns (avg_loss, avg_ce_loss, avg_kl_loss, accuracy).
+    """
+    device = runtime.DEVICE
+    use_amp = runtime.USE_AMP
+
+    model.train()
+    total_loss = 0.0
+    total_ce = 0.0
+    total_kl = 0.0
+    correct = 0
+    total = 0
+
+    for x, y, site, case_id in tqdm(loader):
+        x = x.to(device, non_blocking=True)
+        y = y.to(device, non_blocking=True)
+
+        # --- clean pass (no MixStyle) ---
+        set_all_mixstyle(model, False)
+        with torch.no_grad():
+            with torch.autocast(device_type=device.type, enabled=use_amp):
+                logits_clean = model(x)
+        prob_clean = F.softmax(logits_clean, dim=1).detach()
+
+        # --- mixed pass (MixStyle ON) ---
+        set_all_mixstyle(model, True)
+        optimizer.zero_grad(set_to_none=True)
+        with torch.autocast(device_type=device.type, enabled=use_amp):
+            logits_mixed = model(x)
+            ce_loss = criterion(logits_mixed, y)
+
+            log_prob_mixed = F.log_softmax(logits_mixed, dim=1)
+            kl_loss = F.kl_div(log_prob_mixed, prob_clean, reduction="batchmean")
+
+            loss = ce_loss + lambda_c * kl_loss
+
+        runtime.scaler.scale(loss).backward()
+        runtime.scaler.step(optimizer)
+        runtime.scaler.update()
+
+        total_loss += loss.item()
+        total_ce += ce_loss.item()
+        total_kl += kl_loss.item()
+        preds = logits_mixed.argmax(dim=1)
+        correct += (preds == y).sum().item()
+        total += y.size(0)
+
+    n = len(loader)
+    return total_loss / n, total_ce / n, total_kl / n, correct / total
 
 
 @torch.inference_mode()

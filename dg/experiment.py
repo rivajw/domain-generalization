@@ -15,7 +15,7 @@ from . import config, runtime
 from .dataset import BraTSNPZSliceDataset
 from .models import ResNet18MixStyle
 from .splits import make_loso_split
-from .training import eval_epoch, eval_metrics, set_seed, train_epoch
+from .training import eval_epoch, eval_metrics, set_seed, train_epoch, train_epoch_consistency
 
 
 # ---------------------------------------------------------------------------
@@ -79,6 +79,8 @@ class ModelConfig:
     use_mixstyle: bool = False
     mixstyle_p: float = 0.5
     mixstyle_a: float = 0.1
+    # Consistency regularization (0 = disabled, >0 = lambda weight)
+    consistency_lambda: float = 0.0
 
 
 def build_model(cfg: ModelConfig, pretrained: bool = True, verbose: bool = True):
@@ -137,13 +139,30 @@ def run_experiment(
     history = []
     pth = ckpt_fmt.format(name=cfg.name)
 
+    use_consistency = cfg.consistency_lambda > 0 and cfg.use_mixstyle
+
     for epoch in range(epochs):
-        train_loss, train_acc = train_epoch(model, loaders["train_loader"], optimizer, criterion)
+        if use_consistency:
+            train_loss, ce_loss, kl_loss, train_acc = train_epoch_consistency(
+                model, loaders["train_loader"], optimizer, criterion,
+                lambda_c=cfg.consistency_lambda,
+            )
+            history.append({
+                "epoch": epoch + 1, "train_loss": train_loss,
+                "ce_loss": ce_loss, "kl_loss": kl_loss,
+                "train_acc": train_acc, "val_acc": None,
+            })
+            extra = f" ce={ce_loss:.4f} kl={kl_loss:.4f}"
+        else:
+            train_loss, train_acc = train_epoch(model, loaders["train_loader"], optimizer, criterion)
+            history.append({"epoch": epoch + 1, "train_loss": train_loss, "train_acc": train_acc, "val_acc": None})
+            extra = ""
+
         val_acc = eval_epoch(model, loaders["val_loader"])
-        history.append({"epoch": epoch + 1, "train_loss": train_loss, "train_acc": train_acc, "val_acc": val_acc})
+        history[-1]["val_acc"] = val_acc
         print(
             f"[{cfg.name}] Epoch {epoch+1}/{epochs} | "
-            f"train_loss={train_loss:.4f} train_acc={train_acc:.4f} val_acc={val_acc:.4f}"
+            f"train_loss={train_loss:.4f}{extra} train_acc={train_acc:.4f} val_acc={val_acc:.4f}"
         )
         if val_acc > best_val:
             best_val = val_acc
