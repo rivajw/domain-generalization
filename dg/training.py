@@ -12,6 +12,7 @@ from tqdm import tqdm
 
 from . import runtime
 from .consistency import set_all_mixstyle
+from .mmd import compute_batch_mmd_loss, forward_with_features
 
 
 def set_seed(seed: int = 42) -> None:
@@ -101,6 +102,7 @@ def train_epoch_consistency(model, loader, optimizer, criterion, lambda_c: float
 
             loss = ce_loss + lambda_c * kl_loss
 
+
         runtime.scaler.scale(loss).backward()
         runtime.scaler.step(optimizer)
         runtime.scaler.update()
@@ -114,6 +116,81 @@ def train_epoch_consistency(model, loader, optimizer, criterion, lambda_c: float
 
     n = len(loader)
     return total_loss / n, total_ce / n, total_kl / n, correct / total
+
+def train_epoch_mmd(
+    model,
+    loader,
+    optimizer,
+    criterion,
+    lambda_mmd: float = 0.1,
+    class_conditional: bool = True,
+    sigma_list: tuple[float, ...] = (1.0, 5.0, 10.0),
+    max_samples: int | None = 256,
+):
+    """Training epoch with MMD regularization.
+
+    loss = CE(logits, y) + lambda_mmd * MMD(features across sites)
+
+    Returns
+    -------
+    (avg_loss, avg_ce_loss, avg_mmd_loss, accuracy)
+    """
+    device = runtime.DEVICE
+    use_amp = runtime.USE_AMP
+
+    model.train()
+    total_loss = 0.0
+    total_ce = 0.0
+    total_mmd = 0.0
+    correct = 0
+    total = 0
+
+    for x, y, site, case_id in tqdm(loader):
+        x = x.to(device, non_blocking=True)
+        y = y.to(device, non_blocking=True)
+        site = site.to(device, non_blocking=True)
+
+        optimizer.zero_grad(set_to_none=True)
+
+        with torch.autocast(device_type=device.type, enabled=use_amp):
+            logits, feats = forward_with_features(model, x)
+            if torch.isnan(logits).any() or torch.isinf(logits).any():
+                print("LOGITS NAN/INF")
+                continue
+
+            if torch.isnan(feats).any() or torch.isinf(feats).any():
+                print("FEATURES NAN/INF")
+                continue
+            
+            ce_loss = criterion(logits, y)
+            mmd_loss = compute_batch_mmd_loss(
+                feats,
+                site,
+                labels=y,
+                class_conditional=class_conditional,
+                sigma_list=sigma_list,
+                max_samples=max_samples,
+            )
+            loss = ce_loss + lambda_mmd * mmd_loss
+
+        if torch.isnan(loss) or torch.isinf(loss):
+            print("LOSS IS NAN/INF")
+            print(f"ce_loss={ce_loss.item()}, mmd_loss={mmd_loss.item()}")
+            continue
+
+        runtime.scaler.scale(loss).backward()
+        runtime.scaler.step(optimizer)
+        runtime.scaler.update()
+
+        total_loss += loss.item()
+        total_ce += ce_loss.item()
+        total_mmd += mmd_loss.item()
+        preds = logits.argmax(dim=1)
+        correct += (preds == y).sum().item()
+        total += y.size(0)
+
+    n = len(loader)
+    return total_loss / n, total_ce / n, total_mmd / n, correct / total
 
 
 @torch.inference_mode()

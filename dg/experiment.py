@@ -17,8 +17,14 @@ from . import config, runtime
 from .dataset import BraTSNPZSliceDataset
 from .models import ResNet18MixStyle
 from .splits import make_loso_split
-from .training import eval_epoch, eval_metrics, set_seed, train_epoch, train_epoch_consistency
-
+from .training import (
+    eval_epoch,
+    eval_metrics,
+    set_seed,
+    train_epoch,
+    train_epoch_consistency,
+    train_epoch_mmd,
+)
 
 def _resolve_ckpt_path(ckpt_fmt: str, name: str) -> str:
     ckpt_dir = Path(config.CHECKPOINT_DIR)
@@ -105,8 +111,15 @@ class ModelConfig:
     use_mixstyle: bool = False
     mixstyle_p: float = 0.5
     mixstyle_a: float = 0.1
-    # Consistency regularization (0 = disabled, >0 = lambda weight)
+
+    # KL consistency regularization
     consistency_lambda: float = 0.0
+
+    # MMD regularization
+    mmd_lambda: float = 0.0
+    mmd_class_conditional: bool = True
+    mmd_sigma_list: tuple[float, ...] = (1.0, 5.0, 10.0)
+    mmd_max_samples: int | None = 256
 
 
 def build_model(cfg: ModelConfig, pretrained: bool = True, verbose: bool = True):
@@ -166,24 +179,61 @@ def run_experiment(
     pth = _resolve_ckpt_path(ckpt_fmt, cfg.name)
 
     use_consistency = cfg.consistency_lambda > 0 and cfg.use_mixstyle
+    use_mmd = cfg.mmd_lambda > 0 and cfg.use_mixstyle
 
     for epoch in range(epochs):
+        if use_consistency and use_mmd:
+            raise ValueError("Use either consistency_lambda or mmd_lambda, not both at once.")
+
         if use_consistency:
             train_loss, ce_loss, kl_loss, train_acc = train_epoch_consistency(
-                model, loaders["train_loader"], optimizer, criterion,
+                model,
+                loaders["train_loader"],
+                optimizer,
+                criterion,
                 lambda_c=cfg.consistency_lambda,
             )
             history.append({
-                "epoch": epoch + 1, "train_loss": train_loss,
-                "ce_loss": ce_loss, "kl_loss": kl_loss,
-                "train_acc": train_acc, "val_acc": None,
+                "epoch": epoch + 1,
+                "train_loss": train_loss,
+                "ce_loss": ce_loss,
+                "kl_loss": kl_loss,
+                "train_acc": train_acc,
+                "val_acc": None,
             })
             extra = f" ce={ce_loss:.4f} kl={kl_loss:.4f}"
+
+        elif use_mmd:
+            train_loss, ce_loss, mmd_loss, train_acc = train_epoch_mmd(
+                model,
+                loaders["train_loader"],
+                optimizer,
+                criterion,
+                lambda_mmd=cfg.mmd_lambda,
+                class_conditional=cfg.mmd_class_conditional,
+                sigma_list=cfg.mmd_sigma_list,
+                max_samples=cfg.mmd_max_samples,
+            )
+            history.append({
+                "epoch": epoch + 1,
+                "train_loss": train_loss,
+                "ce_loss": ce_loss,
+                "mmd_loss": mmd_loss,
+                "train_acc": train_acc,
+                "val_acc": None,
+            })
+            extra = f" ce={ce_loss:.4f} mmd={mmd_loss:.4f}"
+
         else:
             train_loss, train_acc = train_epoch(model, loaders["train_loader"], optimizer, criterion)
-            history.append({"epoch": epoch + 1, "train_loss": train_loss, "train_acc": train_acc, "val_acc": None})
+            history.append({
+                "epoch": epoch + 1,
+                "train_loss": train_loss,
+                "train_acc": train_acc,
+                "val_acc": None,
+            })
             extra = ""
-
+        
         val_acc = eval_epoch(model, loaders["val_loader"])
         history[-1]["val_acc"] = val_acc
         print(
@@ -212,6 +262,9 @@ def run_experiment(
         "train_layers": list(cfg.train_layers),
         "mixstyle_p": cfg.mixstyle_p,
         "mixstyle_a": cfg.mixstyle_a,
+        "consistency_lambda": cfg.consistency_lambda,
+        "mmd_lambda": cfg.mmd_lambda,
+        "mmd_class_conditional": cfg.mmd_class_conditional,
         "data_config": data_cfg.name,
         "train_cases": sorted(data_cfg.train_cases),
         "validation_cases": sorted(data_cfg.validation_cases),
