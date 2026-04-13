@@ -23,6 +23,10 @@ def _load_synapse_token() -> str:
 # -----------------------
 # Paths
 # -----------------------
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+ARTIFACTS_ROOT = str(PROJECT_ROOT / "artifacts")
+CHECKPOINT_DIR = str(PROJECT_ROOT / "artifacts" / "checkpoints")
+RESULTS_DIR = str(PROJECT_ROOT / "artifacts" / "results")
 TOKEN = _load_synapse_token()
 ZIP_PATH = "./ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData.zip"
 MAPPING_XLSX = "./BraTS2023_2017_GLI_Mapping.xlsx"

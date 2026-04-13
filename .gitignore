@@ -208,3 +208,7 @@ __marimo__/
 
 # Secrets
 .secrets.env
+/brats23_npz_dg
+*.pth
+*.zip
+BraTS2023_2017_GLI_Mapping.xlsx

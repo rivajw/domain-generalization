@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import FrozenSet
 
 import pandas as pd
@@ -16,6 +18,30 @@ from .dataset import BraTSNPZSliceDataset
 from .models import ResNet18MixStyle
 from .splits import make_loso_split
 from .training import eval_epoch, eval_metrics, set_seed, train_epoch, train_epoch_consistency
+
+
+def _resolve_ckpt_path(ckpt_fmt: str, name: str) -> str:
+    ckpt_dir = Path(config.CHECKPOINT_DIR)
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    return str(ckpt_dir / ckpt_fmt.format(name=name))
+
+
+def _resolve_result_path(name: str) -> Path:
+    results_dir = Path(config.RESULTS_DIR)
+    results_dir.mkdir(parents=True, exist_ok=True)
+    return results_dir / f"{name}.json"
+
+
+def _save_experiment_result(result: dict) -> None:
+    result_path = _resolve_result_path(result["name"])
+    result_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
+
+
+def load_experiment_result(name: str) -> dict | None:
+    result_path = _resolve_result_path(name)
+    if not result_path.exists():
+        return None
+    return json.loads(result_path.read_text(encoding="utf-8"))
 
 
 # ---------------------------------------------------------------------------
@@ -137,7 +163,7 @@ def run_experiment(
     best_val = 0.0
     no_improve = 0
     history = []
-    pth = ckpt_fmt.format(name=cfg.name)
+    pth = _resolve_ckpt_path(ckpt_fmt, cfg.name)
 
     use_consistency = cfg.consistency_lambda > 0 and cfg.use_mixstyle
 
@@ -178,7 +204,7 @@ def run_experiment(
     in_domain_test_acc = eval_epoch(model, loaders["test_loader"])
     out_domain_test_acc = eval_epoch(model, loaders["out_domain_test_loader"])
 
-    return {
+    result = {
         "name": cfg.name,
         "best_val": best_val,
         "history": history,
@@ -193,6 +219,8 @@ def run_experiment(
         "in_domain_test_acc": in_domain_test_acc,
         "out_domain_test_acc": out_domain_test_acc,
     }
+    _save_experiment_result(result)
+    return result
 
 
 def run_loso_experiment(
@@ -275,7 +303,13 @@ def run_loso_sweep(cfg: ModelConfig, sites: list[int], index_df: pd.DataFrame, *
 def load_trained_model(cfg: ModelConfig, ckpt_fmt: str = "best_{name}.pth"):
     """Reload a trained model from its checkpoint."""
     model, _, _ = build_model(cfg, verbose=False)
-    model.load_state_dict(torch.load(ckpt_fmt.format(name=cfg.name)))
+    ckpt_path = _resolve_ckpt_path(ckpt_fmt, cfg.name)
+    if not Path(ckpt_path).exists():
+        raise FileNotFoundError(
+            f"Checkpoint not found for {cfg.name}: {ckpt_path}. "
+            "Run the training cell for this config first."
+        )
+    model.load_state_dict(torch.load(ckpt_path))
     return model
 
 
@@ -289,10 +323,20 @@ def report_experiments(
     print("=== Report ===\n")
     records = []
     for cfg in experiments:
-        model = load_trained_model(cfg, ckpt_fmt=ckpt_fmt)
+        try:
+            model = load_trained_model(cfg, ckpt_fmt=ckpt_fmt)
+        except FileNotFoundError as exc:
+            print(f"{cfg.name} | checkpoint missing")
+            print(f"  {exc}")
+            continue
         in_m = eval_metrics(model, loaders["test_loader"])
         out_m = eval_metrics(model, loaders["out_domain_test_loader"])
-        best_val = results_by_name[cfg.name]["best_val"] if results_by_name and cfg.name in results_by_name else None
+        saved_result = load_experiment_result(cfg.name)
+        best_val = None
+        if results_by_name and cfg.name in results_by_name:
+            best_val = results_by_name[cfg.name]["best_val"]
+        elif saved_result is not None:
+            best_val = saved_result.get("best_val")
         records.append((cfg, best_val, in_m, out_m))
         val_str = f"{best_val:.4f}" if best_val is not None else "N/A"
         print(
@@ -316,7 +360,12 @@ def compare_models(model_cfgs: list[ModelConfig], loaders: dict, ckpt_fmt: str =
     """Evaluate each config and, if exactly two are provided, print baseline-vs-compare deltas."""
     eval_results = []
     for cfg in model_cfgs:
-        model = load_trained_model(cfg, ckpt_fmt=ckpt_fmt)
+        try:
+            model = load_trained_model(cfg, ckpt_fmt=ckpt_fmt)
+        except FileNotFoundError as exc:
+            print(f"{cfg.name}")
+            print(f"  {exc}")
+            continue
         in_m = eval_metrics(model, loaders["test_loader"])
         out_m = eval_metrics(model, loaders["out_domain_test_loader"])
         eval_results.append((cfg, in_m, out_m))

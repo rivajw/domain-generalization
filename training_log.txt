@@ -1,0 +1,55 @@
+Epoch 1/15
+Train loss: 0.4916
+Train acc: 0.7749
+Val acc: 0.8586
+
+Epoch 2/15
+Train loss: 0.3556
+Train acc: 0.8515
+Val acc: 0.8669
+
+Epoch 3/15
+Train loss: 0.3260
+Train acc: 0.8618
+Val acc: 0.8739
+
+Epoch 4/15
+Train loss: 0.3134
+Train acc: 0.8655
+Val acc: 0.8757
+
+Epoch 5/15
+Train loss: 0.3045
+Train acc: 0.8686
+Val acc: 0.8761
+
+Epoch 6/15
+Train loss: 0.2992
+Train acc: 0.8717
+Val acc: 0.8783
+
+Epoch 7/15
+Train loss: 0.2931
+Train acc: 0.8735
+Val acc: 0.8767
+
+Epoch 8/15
+Train loss: 0.2913
+Train acc: 0.8752
+Val acc: 0.8851
+
+Epoch 9/15
+Train loss: 0.2871
+Train acc: 0.8763
+Val acc: 0.8851
+
+Epoch 10/15
+Train loss: 0.2841
+Train acc: 0.8794
+Val acc: 0.8849
+
+Epoch 11/15
+Train loss: 0.2822
+Train acc: 0.8782
+Val acc: 0.8791
+
