@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 import random
-from typing import Optional
 
 import numpy as np
 import torch
@@ -12,8 +11,8 @@ import torch.nn.functional as F
 from tqdm import tqdm
 
 from . import runtime
+from .consistency import set_all_mixstyle
 from .mmd import compute_batch_mmd_loss, forward_with_features
-from .models import configure_all_mixstyle, set_all_mixstyle
 
 
 def set_seed(seed: int = 42) -> None:
@@ -27,12 +26,6 @@ def set_seed(seed: int = 42) -> None:
         torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
-
-
-def _safe_epoch_stats(total_loss: float, correct: int, total: int, num_valid_batches: int):
-    if num_valid_batches == 0:
-        return float("nan"), 0.0 if total == 0 else correct / total
-    return total_loss / num_valid_batches, 0.0 if total == 0 else correct / total
 
 
 def train_epoch(model, loader, optimizer, criterion):
@@ -66,21 +59,12 @@ def train_epoch(model, loader, optimizer, criterion):
     return total_loss / len(loader), correct / total
 
 
-def train_epoch_consistency(
-    model,
-    loader,
-    optimizer,
-    criterion,
-    lambda_c: float = 0.1,
-    mixstyle_enabled: bool = True,
-    mixstyle_p: Optional[float] = None,
-    mixstyle_a: Optional[float] = None,
-):
+def train_epoch_consistency(model, loader, optimizer, criterion, lambda_c: float = 0.1):
     """Training epoch with consistency regularization.
 
     For each batch:
     1. Clean forward pass (MixStyle OFF) → logits_clean (detached target)
-    2. Mixed forward pass (MixStyle schedule applied) → logits_mixed
+    2. Mixed forward pass (MixStyle ON) → logits_mixed
     3. loss = CE(logits_mixed, y) + lambda_c * KL(mixed_softmax || clean_softmax.detach())
 
     Returns (avg_loss, avg_ce_loss, avg_kl_loss, accuracy).
@@ -94,24 +78,20 @@ def train_epoch_consistency(
     total_kl = 0.0
     correct = 0
     total = 0
-    num_valid_batches = 0
 
     for x, y, site, case_id in tqdm(loader):
         x = x.to(device, non_blocking=True)
         y = y.to(device, non_blocking=True)
 
-        configure_all_mixstyle(model, enabled=False)
+        # --- clean pass (no MixStyle) ---
+        set_all_mixstyle(model, False)
         with torch.no_grad():
             with torch.autocast(device_type=device.type, enabled=use_amp):
                 logits_clean = model(x)
         prob_clean = F.softmax(logits_clean, dim=1).detach()
 
-        configure_all_mixstyle(
-            model,
-            enabled=mixstyle_enabled,
-            p=mixstyle_p,
-            a=mixstyle_a,
-        )
+        # --- mixed pass (MixStyle ON) ---
+        set_all_mixstyle(model, True)
         optimizer.zero_grad(set_to_none=True)
         with torch.autocast(device_type=device.type, enabled=use_amp):
             logits_mixed = model(x)
@@ -121,6 +101,7 @@ def train_epoch_consistency(
             kl_loss = F.kl_div(log_prob_mixed, prob_clean, reduction="batchmean")
 
             loss = ce_loss + lambda_c * kl_loss
+
 
         runtime.scaler.scale(loss).backward()
         runtime.scaler.step(optimizer)
@@ -132,18 +113,9 @@ def train_epoch_consistency(
         preds = logits_mixed.argmax(dim=1)
         correct += (preds == y).sum().item()
         total += y.size(0)
-        num_valid_batches += 1
 
-    if num_valid_batches == 0:
-        return float("nan"), float("nan"), float("nan"), 0.0
-
-    return (
-        total_loss / num_valid_batches,
-        total_ce / num_valid_batches,
-        total_kl / num_valid_batches,
-        correct / total if total > 0 else 0.0,
-    )
-
+    n = len(loader)
+    return total_loss / n, total_ce / n, total_kl / n, correct / total
 
 def train_epoch_mmd(
     model,
@@ -154,9 +126,6 @@ def train_epoch_mmd(
     class_conditional: bool = True,
     sigma_list: tuple[float, ...] = (1.0, 5.0, 10.0),
     max_samples: int | None = 256,
-    mixstyle_enabled: bool = True,
-    mixstyle_p: Optional[float] = None,
-    mixstyle_a: Optional[float] = None,
 ):
     """Training epoch with MMD regularization.
 
@@ -175,19 +144,12 @@ def train_epoch_mmd(
     total_mmd = 0.0
     correct = 0
     total = 0
-    num_valid_batches = 0
 
     for x, y, site, case_id in tqdm(loader):
         x = x.to(device, non_blocking=True)
         y = y.to(device, non_blocking=True)
         site = site.to(device, non_blocking=True)
 
-        configure_all_mixstyle(
-            model,
-            enabled=mixstyle_enabled,
-            p=mixstyle_p,
-            a=mixstyle_a,
-        )
         optimizer.zero_grad(set_to_none=True)
 
         with torch.autocast(device_type=device.type, enabled=use_amp):
@@ -199,19 +161,16 @@ def train_epoch_mmd(
             if torch.isnan(feats).any() or torch.isinf(feats).any():
                 print("FEATURES NAN/INF")
                 continue
-
+            
             ce_loss = criterion(logits, y)
-            if lambda_mmd > 0:
-                mmd_loss = compute_batch_mmd_loss(
-                    feats,
-                    site,
-                    labels=y,
-                    class_conditional=class_conditional,
-                    sigma_list=sigma_list,
-                    max_samples=max_samples,
-                )
-            else:
-                mmd_loss = torch.zeros((), device=device, dtype=ce_loss.dtype)
+            mmd_loss = compute_batch_mmd_loss(
+                feats,
+                site,
+                labels=y,
+                class_conditional=class_conditional,
+                sigma_list=sigma_list,
+                max_samples=max_samples,
+            )
             loss = ce_loss + lambda_mmd * mmd_loss
 
         if torch.isnan(loss) or torch.isinf(loss):
@@ -229,17 +188,9 @@ def train_epoch_mmd(
         preds = logits.argmax(dim=1)
         correct += (preds == y).sum().item()
         total += y.size(0)
-        num_valid_batches += 1
 
-    if num_valid_batches == 0:
-        return float("nan"), float("nan"), float("nan"), 0.0
-
-    return (
-        total_loss / num_valid_batches,
-        total_ce / num_valid_batches,
-        total_mmd / num_valid_batches,
-        correct / total if total > 0 else 0.0,
-    )
+    n = len(loader)
+    return total_loss / n, total_ce / n, total_mmd / n, correct / total
 
 
 def train_epoch_consistency_mmd(
@@ -252,15 +203,11 @@ def train_epoch_consistency_mmd(
     class_conditional: bool = True,
     sigma_list: tuple[float, ...] = (1.0, 5.0, 10.0),
     max_samples: int | None = 256,
-    mixstyle_enabled: bool = True,
-    mixstyle_p: Optional[float] = None,
-    mixstyle_a: Optional[float] = None,
-    mmd_on_clean_features: bool = False,
 ):
     """Training epoch with both consistency regularization and MMD regularization.
 
     loss = CE(logits_mixed, y) + lambda_c * KL(mixed_softmax || clean_softmax.detach())
-            + lambda_mmd * MMD(features across sites)
+            + lambda_mmd * MMD(feats_mixed across sites)
 
     Returns
     -------
@@ -276,25 +223,21 @@ def train_epoch_consistency_mmd(
     total_mmd = 0.0
     correct = 0
     total = 0
-    num_valid_batches = 0
 
     for x, y, site, case_id in tqdm(loader):
         x = x.to(device, non_blocking=True)
         y = y.to(device, non_blocking=True)
         site = site.to(device, non_blocking=True)
 
-        configure_all_mixstyle(model, enabled=False)
+        # --- clean pass (no MixStyle) ---
+        set_all_mixstyle(model, False)
         with torch.no_grad():
             with torch.autocast(device_type=device.type, enabled=use_amp):
-                logits_clean, feats_clean = forward_with_features(model, x)
+                logits_clean = model(x)
         prob_clean = F.softmax(logits_clean, dim=1).detach()
 
-        configure_all_mixstyle(
-            model,
-            enabled=mixstyle_enabled,
-            p=mixstyle_p,
-            a=mixstyle_a,
-        )
+        # --- mixed pass (MixStyle ON) ---
+        set_all_mixstyle(model, True)
         optimizer.zero_grad(set_to_none=True)
 
         with torch.autocast(device_type=device.type, enabled=use_amp):
@@ -313,18 +256,14 @@ def train_epoch_consistency_mmd(
             log_prob_mixed = F.log_softmax(logits_mixed, dim=1)
             kl_loss = F.kl_div(log_prob_mixed, prob_clean, reduction="batchmean")
 
-            if lambda_mmd > 0:
-                feats_for_mmd = feats_clean if mmd_on_clean_features else feats_mixed
-                mmd_loss = compute_batch_mmd_loss(
-                    feats_for_mmd,
-                    site,
-                    labels=y,
-                    class_conditional=class_conditional,
-                    sigma_list=sigma_list,
-                    max_samples=max_samples,
-                )
-            else:
-                mmd_loss = torch.zeros((), device=device, dtype=ce_loss.dtype)
+            mmd_loss = compute_batch_mmd_loss(
+                feats_mixed,
+                site,
+                labels=y,
+                class_conditional=class_conditional,
+                sigma_list=sigma_list,
+                max_samples=max_samples,
+            )
 
             loss = ce_loss + lambda_c * kl_loss + lambda_mmd * mmd_loss
 
@@ -349,18 +288,9 @@ def train_epoch_consistency_mmd(
         preds = logits_mixed.argmax(dim=1)
         correct += (preds == y).sum().item()
         total += y.size(0)
-        num_valid_batches += 1
 
-    if num_valid_batches == 0:
-        return float("nan"), float("nan"), float("nan"), float("nan"), 0.0
-
-    return (
-        total_loss / num_valid_batches,
-        total_ce / num_valid_batches,
-        total_kl / num_valid_batches,
-        total_mmd / num_valid_batches,
-        correct / total if total > 0 else 0.0,
-    )
+    n = len(loader)
+    return total_loss / n, total_ce / n, total_kl / n, total_mmd / n, correct / total
 
 
 @torch.inference_mode()
@@ -369,7 +299,6 @@ def eval_epoch(model, loader):
     device = runtime.DEVICE
     use_amp = runtime.USE_AMP
 
-    configure_all_mixstyle(model, enabled=False)
     model.eval()
     correct = 0
     total = 0
@@ -390,7 +319,6 @@ def eval_metrics(model, loader):
     device = runtime.DEVICE
     use_amp = runtime.USE_AMP
 
-    configure_all_mixstyle(model, enabled=False)
     model.eval()
     tp = fp = tn = fn = 0
     for x, y, site, case_id in loader:
