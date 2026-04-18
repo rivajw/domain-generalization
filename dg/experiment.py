@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import FrozenSet, Optional
+from typing import FrozenSet
 
 import pandas as pd
 import torch
@@ -26,7 +26,6 @@ from .training import (
     train_epoch_mmd,
     train_epoch_consistency_mmd,
 )
-
 
 def _resolve_ckpt_path(ckpt_fmt: str, name: str) -> str:
     ckpt_dir = Path(config.CHECKPOINT_DIR)
@@ -107,118 +106,6 @@ def prepare_dataloaders_from_config(
 
 
 @dataclass(frozen=True)
-class StageConfig:
-    # Optional target overrides; when None, fall back to ModelConfig static values.
-    consistency_lambda_target: Optional[float] = None
-    consistency_warmup_epochs: int = 0
-    consistency_ramp_epochs: int = 0
-    consistency_start_value: float = 0.0
-
-    mmd_lambda_target: Optional[float] = None
-    mmd_warmup_epochs: int = 0
-    mmd_ramp_epochs: int = 0
-    mmd_start_value: float = 0.0
-
-    mixstyle_enable_after_epoch: int = 0
-    mixstyle_p_start: Optional[float] = None
-    mixstyle_p_target: Optional[float] = None
-    mixstyle_p_ramp_epochs: int = 0
-
-    mixstyle_a_start: Optional[float] = None
-    mixstyle_a_target: Optional[float] = None
-    mixstyle_a_ramp_epochs: int = 0
-
-
-def _linear_warmup_ramp(
-    epoch: int,
-    target_value: float,
-    warmup_epochs: int = 0,
-    ramp_epochs: int = 0,
-    start_value: float = 0.0,
-) -> float:
-    if epoch < warmup_epochs:
-        return start_value
-    if ramp_epochs <= 0:
-        return target_value
-
-    t = epoch - warmup_epochs
-    if t >= ramp_epochs:
-        return target_value
-
-    ratio = t / ramp_epochs
-    return start_value + ratio * (target_value - start_value)
-
-
-def _resolve_epoch_stage_values(cfg: "ModelConfig", epoch: int) -> dict:
-    if cfg.stage_cfg is None:
-        return {
-            "lambda_c": float(cfg.consistency_lambda),
-            "lambda_mmd": float(cfg.mmd_lambda),
-            "mixstyle_enabled": bool(cfg.use_mixstyle),
-            "mixstyle_p": float(cfg.mixstyle_p),
-            "mixstyle_a": float(cfg.mixstyle_a),
-        }
-
-    stage_cfg = cfg.stage_cfg
-
-    consistency_target = (
-        cfg.consistency_lambda
-        if stage_cfg.consistency_lambda_target is None
-        else stage_cfg.consistency_lambda_target
-    )
-    mmd_target = cfg.mmd_lambda if stage_cfg.mmd_lambda_target is None else stage_cfg.mmd_lambda_target
-
-    lambda_c = _linear_warmup_ramp(
-        epoch=epoch,
-        target_value=consistency_target,
-        warmup_epochs=stage_cfg.consistency_warmup_epochs,
-        ramp_epochs=stage_cfg.consistency_ramp_epochs,
-        start_value=stage_cfg.consistency_start_value,
-    )
-    lambda_mmd = _linear_warmup_ramp(
-        epoch=epoch,
-        target_value=mmd_target,
-        warmup_epochs=stage_cfg.mmd_warmup_epochs,
-        ramp_epochs=stage_cfg.mmd_ramp_epochs,
-        start_value=stage_cfg.mmd_start_value,
-    )
-
-    mixstyle_enabled = cfg.use_mixstyle and (epoch >= stage_cfg.mixstyle_enable_after_epoch)
-
-    mixstyle_p_target = cfg.mixstyle_p if stage_cfg.mixstyle_p_target is None else stage_cfg.mixstyle_p_target
-    mixstyle_a_target = cfg.mixstyle_a if stage_cfg.mixstyle_a_target is None else stage_cfg.mixstyle_a_target
-    mixstyle_p_start = mixstyle_p_target if stage_cfg.mixstyle_p_start is None else stage_cfg.mixstyle_p_start
-    mixstyle_a_start = mixstyle_a_target if stage_cfg.mixstyle_a_start is None else stage_cfg.mixstyle_a_start
-
-    rel_epoch = max(0, epoch - stage_cfg.mixstyle_enable_after_epoch)
-    mixstyle_p = _linear_warmup_ramp(
-        epoch=rel_epoch,
-        target_value=mixstyle_p_target,
-        warmup_epochs=0,
-        ramp_epochs=stage_cfg.mixstyle_p_ramp_epochs,
-        start_value=mixstyle_p_start,
-    )
-    mixstyle_a = _linear_warmup_ramp(
-        epoch=rel_epoch,
-        target_value=mixstyle_a_target,
-        warmup_epochs=0,
-        ramp_epochs=stage_cfg.mixstyle_a_ramp_epochs,
-        start_value=mixstyle_a_start,
-    )
-
-    if not mixstyle_enabled:
-        mixstyle_p = 0.0
-
-    return {
-        "lambda_c": float(lambda_c),
-        "lambda_mmd": float(lambda_mmd),
-        "mixstyle_enabled": bool(mixstyle_enabled),
-        "mixstyle_p": float(mixstyle_p),
-        "mixstyle_a": float(mixstyle_a),
-    }
-
-
-@dataclass(frozen=True)
 class ModelConfig:
     name: str
     train_layers: tuple[int, ...] = tuple()
@@ -234,10 +121,6 @@ class ModelConfig:
     mmd_class_conditional: bool = True
     mmd_sigma_list: tuple[float, ...] = (1.0, 5.0, 10.0)
     mmd_max_samples: int | None = 256
-    mmd_on_clean_features: bool = False
-
-    # Optional staged schedule overrides.
-    stage_cfg: Optional[StageConfig] = None
 
 
 def build_model(cfg: ModelConfig, pretrained: bool = True, verbose: bool = True):
@@ -264,8 +147,6 @@ def build_model(cfg: ModelConfig, pretrained: bool = True, verbose: bool = True)
         print(f"\nModel Config: {cfg.name}")
         print(f"  train_layers={layer_label}")
         print(f"  use_mixstyle={cfg.use_mixstyle} mixstyle_p={cfg.mixstyle_p} mixstyle_a={cfg.mixstyle_a}")
-        if cfg.stage_cfg is not None:
-            print(f"  stage_cfg={cfg.stage_cfg}")
         print(f"  insert_after={insert_after}")
         print(f"  trainable_params={trainable_count}")
         print(f"  trainable_modules={trainable_names[:12]}{' ...' if len(trainable_names) > 12 else ''}")
@@ -278,134 +159,6 @@ def build_model(cfg: ModelConfig, pretrained: bool = True, verbose: bool = True)
 # ---------------------------------------------------------------------------
 # Experiment loops
 # ---------------------------------------------------------------------------
-def _uses_consistency(cfg: ModelConfig) -> bool:
-    if not cfg.use_mixstyle:
-        return False
-    if cfg.stage_cfg is not None and cfg.stage_cfg.consistency_lambda_target is not None:
-        return cfg.stage_cfg.consistency_lambda_target > 0
-    return cfg.consistency_lambda > 0
-
-
-def _uses_mmd(cfg: ModelConfig) -> bool:
-    if cfg.stage_cfg is not None and cfg.stage_cfg.mmd_lambda_target is not None:
-        return cfg.stage_cfg.mmd_lambda_target > 0
-    return cfg.mmd_lambda > 0
-
-
-def _train_one_epoch(cfg: ModelConfig, model, loaders, optimizer, criterion, epoch: int):
-    stage_vals = _resolve_epoch_stage_values(cfg, epoch)
-    use_consistency = _uses_consistency(cfg)
-    use_mmd = _uses_mmd(cfg)
-
-    if use_consistency and use_mmd:
-        train_loss, ce_loss, reg1_loss, reg2_loss, train_acc = train_epoch_consistency_mmd(
-            model,
-            loaders["train_loader"],
-            optimizer,
-            criterion,
-            lambda_c=stage_vals["lambda_c"],
-            lambda_mmd=stage_vals["lambda_mmd"],
-            class_conditional=cfg.mmd_class_conditional,
-            sigma_list=cfg.mmd_sigma_list,
-            max_samples=cfg.mmd_max_samples,
-            mixstyle_enabled=stage_vals["mixstyle_enabled"],
-            mixstyle_p=stage_vals["mixstyle_p"],
-            mixstyle_a=stage_vals["mixstyle_a"],
-            mmd_on_clean_features=cfg.mmd_on_clean_features,
-        )
-        log = {
-            "train_loss": train_loss,
-            "ce_loss": ce_loss,
-            "kl_loss": reg1_loss,
-            "mmd_loss": reg2_loss,
-            "train_acc": train_acc,
-            "lambda_c": stage_vals["lambda_c"],
-            "lambda_mmd": stage_vals["lambda_mmd"],
-            "mixstyle_enabled": stage_vals["mixstyle_enabled"],
-            "mixstyle_p": stage_vals["mixstyle_p"],
-            "mixstyle_a": stage_vals["mixstyle_a"],
-        }
-        extra = (
-            f" ce={ce_loss:.4f} kl={reg1_loss:.4f} mmd={reg2_loss:.4f}"
-            f" lc={stage_vals['lambda_c']:.4f} lm={stage_vals['lambda_mmd']:.4f}"
-            f" ms={int(stage_vals['mixstyle_enabled'])} p={stage_vals['mixstyle_p']:.3f} a={stage_vals['mixstyle_a']:.3f}"
-        )
-        return log, extra
-
-    if use_consistency:
-        train_loss, ce_loss, kl_loss, train_acc = train_epoch_consistency(
-            model,
-            loaders["train_loader"],
-            optimizer,
-            criterion,
-            lambda_c=stage_vals["lambda_c"],
-            mixstyle_enabled=stage_vals["mixstyle_enabled"],
-            mixstyle_p=stage_vals["mixstyle_p"],
-            mixstyle_a=stage_vals["mixstyle_a"],
-        )
-        log = {
-            "train_loss": train_loss,
-            "ce_loss": ce_loss,
-            "kl_loss": kl_loss,
-            "train_acc": train_acc,
-            "lambda_c": stage_vals["lambda_c"],
-            "lambda_mmd": 0.0,
-            "mixstyle_enabled": stage_vals["mixstyle_enabled"],
-            "mixstyle_p": stage_vals["mixstyle_p"],
-            "mixstyle_a": stage_vals["mixstyle_a"],
-        }
-        extra = (
-            f" ce={ce_loss:.4f} kl={kl_loss:.4f}"
-            f" lc={stage_vals['lambda_c']:.4f}"
-            f" ms={int(stage_vals['mixstyle_enabled'])} p={stage_vals['mixstyle_p']:.3f} a={stage_vals['mixstyle_a']:.3f}"
-        )
-        return log, extra
-
-    if use_mmd:
-        train_loss, ce_loss, mmd_loss, train_acc = train_epoch_mmd(
-            model,
-            loaders["train_loader"],
-            optimizer,
-            criterion,
-            lambda_mmd=stage_vals["lambda_mmd"],
-            class_conditional=cfg.mmd_class_conditional,
-            sigma_list=cfg.mmd_sigma_list,
-            max_samples=cfg.mmd_max_samples,
-            mixstyle_enabled=stage_vals["mixstyle_enabled"],
-            mixstyle_p=stage_vals["mixstyle_p"],
-            mixstyle_a=stage_vals["mixstyle_a"],
-        )
-        log = {
-            "train_loss": train_loss,
-            "ce_loss": ce_loss,
-            "mmd_loss": mmd_loss,
-            "train_acc": train_acc,
-            "lambda_c": 0.0,
-            "lambda_mmd": stage_vals["lambda_mmd"],
-            "mixstyle_enabled": stage_vals["mixstyle_enabled"],
-            "mixstyle_p": stage_vals["mixstyle_p"],
-            "mixstyle_a": stage_vals["mixstyle_a"],
-        }
-        extra = (
-            f" ce={ce_loss:.4f} mmd={mmd_loss:.4f}"
-            f" lm={stage_vals['lambda_mmd']:.4f}"
-            f" ms={int(stage_vals['mixstyle_enabled'])} p={stage_vals['mixstyle_p']:.3f} a={stage_vals['mixstyle_a']:.3f}"
-        )
-        return log, extra
-
-    train_loss, train_acc = train_epoch(model, loaders["train_loader"], optimizer, criterion)
-    log = {
-        "train_loss": train_loss,
-        "train_acc": train_acc,
-        "lambda_c": 0.0,
-        "lambda_mmd": 0.0,
-        "mixstyle_enabled": stage_vals["mixstyle_enabled"],
-        "mixstyle_p": stage_vals["mixstyle_p"],
-        "mixstyle_a": stage_vals["mixstyle_a"],
-    }
-    return log, ""
-
-
 def run_experiment(
     cfg: ModelConfig,
     data_cfg: DataSplitConfig,
@@ -426,14 +179,82 @@ def run_experiment(
     history = []
     pth = _resolve_ckpt_path(ckpt_fmt, cfg.name)
 
-    for epoch in range(epochs):
-        epoch_log, extra = _train_one_epoch(cfg, model, loaders, optimizer, criterion, epoch)
-        epoch_log["epoch"] = epoch + 1
-        epoch_log["val_acc"] = None
-        history.append(epoch_log)
+    use_consistency = cfg.consistency_lambda > 0 and cfg.use_mixstyle
+    use_mmd = cfg.mmd_lambda > 0 and cfg.use_mixstyle
 
-        train_loss = epoch_log["train_loss"]
-        train_acc = epoch_log["train_acc"]
+    for epoch in range(epochs):
+        if use_consistency and use_mmd:
+            train_loss, ce_loss, reg1_loss, reg2_loss, train_acc = train_epoch_consistency_mmd(
+                model,
+                loaders["train_loader"],
+                optimizer,
+                criterion,
+                lambda_c=cfg.consistency_lambda,
+                lambda_mmd=cfg.mmd_lambda,
+                class_conditional=cfg.mmd_class_conditional,
+                sigma_list=cfg.mmd_sigma_list,
+                max_samples=cfg.mmd_max_samples,
+            )
+            history.append({
+                "epoch": epoch + 1,
+                "train_loss": train_loss,
+                "ce_loss": ce_loss,
+                "kl_loss": reg1_loss,
+                "mmd_loss": reg2_loss,
+                "train_acc": train_acc,
+                "val_acc": None,
+            })
+            extra = f" ce={ce_loss:.4f} kl={reg1_loss:.4f} mmd={reg2_loss:.4f}"
+
+        elif use_consistency:
+            train_loss, ce_loss, kl_loss, train_acc = train_epoch_consistency(
+                model,
+                loaders["train_loader"],
+                optimizer,
+                criterion,
+                lambda_c=cfg.consistency_lambda,
+            )
+            history.append({
+                "epoch": epoch + 1,
+                "train_loss": train_loss,
+                "ce_loss": ce_loss,
+                "kl_loss": kl_loss,
+                "train_acc": train_acc,
+                "val_acc": None,
+            })
+            extra = f" ce={ce_loss:.4f} kl={kl_loss:.4f}"
+
+        elif use_mmd:
+            train_loss, ce_loss, mmd_loss, train_acc = train_epoch_mmd(
+                model,
+                loaders["train_loader"],
+                optimizer,
+                criterion,
+                lambda_mmd=cfg.mmd_lambda,
+                class_conditional=cfg.mmd_class_conditional,
+                sigma_list=cfg.mmd_sigma_list,
+                max_samples=cfg.mmd_max_samples,
+            )
+            history.append({
+                "epoch": epoch + 1,
+                "train_loss": train_loss,
+                "ce_loss": ce_loss,
+                "mmd_loss": mmd_loss,
+                "train_acc": train_acc,
+                "val_acc": None,
+            })
+            extra = f" ce={ce_loss:.4f} mmd={mmd_loss:.4f}"
+
+        else:
+            train_loss, train_acc = train_epoch(model, loaders["train_loader"], optimizer, criterion)
+            history.append({
+                "epoch": epoch + 1,
+                "train_loss": train_loss,
+                "train_acc": train_acc,
+                "val_acc": None,
+            })
+            extra = ""
+        
         val_acc = eval_epoch(model, loaders["val_loader"])
         history[-1]["val_acc"] = val_acc
         print(
@@ -450,7 +271,7 @@ def run_experiment(
                 print(f"[{cfg.name}] Early stopping at epoch {epoch+1} (patience={patience})")
                 break
 
-    model.load_state_dict(torch.load(pth, map_location=runtime.DEVICE))
+    model.load_state_dict(torch.load(pth))
     in_domain_test_acc = eval_epoch(model, loaders["test_loader"])
     out_domain_test_acc = eval_epoch(model, loaders["out_domain_test_loader"])
 
@@ -465,8 +286,6 @@ def run_experiment(
         "consistency_lambda": cfg.consistency_lambda,
         "mmd_lambda": cfg.mmd_lambda,
         "mmd_class_conditional": cfg.mmd_class_conditional,
-        "mmd_on_clean_features": cfg.mmd_on_clean_features,
-        "stage_cfg": None if cfg.stage_cfg is None else cfg.stage_cfg.__dict__,
         "data_config": data_cfg.name,
         "train_cases": sorted(data_cfg.train_cases),
         "validation_cases": sorted(data_cfg.validation_cases),
@@ -506,13 +325,11 @@ def run_loso_experiment(
     no_improve = 0
 
     for epoch in range(epochs):
-        epoch_log, extra = _train_one_epoch(cfg, model, loaders, optimizer, criterion, epoch)
-        train_loss = epoch_log["train_loss"]
-        train_acc = epoch_log["train_acc"]
+        train_loss, train_acc = train_epoch(model, loaders["train_loader"], optimizer, criterion)
         val_acc = eval_epoch(model, loaders["val_loader"])
         print(
             f"[site {held_out_site:02d}] {cfg.name} epoch {epoch+1}/{epochs} | "
-            f"train_loss={train_loss:.4f}{extra} train_acc={train_acc:.4f} val_acc={val_acc:.4f}"
+            f"train_loss={train_loss:.4f} train_acc={train_acc:.4f} val_acc={val_acc:.4f}"
         )
         if val_acc > best_val:
             best_val = val_acc
@@ -566,7 +383,7 @@ def load_trained_model(cfg: ModelConfig, ckpt_fmt: str = "best_{name}.pth"):
             f"Checkpoint not found for {cfg.name}: {ckpt_path}. "
             "Run the training cell for this config first."
         )
-    model.load_state_dict(torch.load(ckpt_path, map_location=runtime.DEVICE))
+    model.load_state_dict(torch.load(ckpt_path))
     return model
 
 
