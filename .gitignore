@@ -205,3 +205,8 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+/artifacts
+*.zip
+BraTS2023_2017_GLI_Mapping.xlsx
+brats23_npz_dg/index.csv
+/brats23_npz_dg
