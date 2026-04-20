@@ -211,3 +211,5 @@ __marimo__/
 /brats23_npz_dg
 *.zip
 BraTS2023_2017_GLI_Mapping.xlsx
+*.pth
+/artifacts
