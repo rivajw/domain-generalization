@@ -102,7 +102,12 @@ class ResNet18MixStyle(nn.Module):
         self.ms3 = MixStyle(p=mixstyle_p, alpha=mixstyle_alpha) if "layer3" in insert_after else None
         self.ms4 = MixStyle(p=mixstyle_p, alpha=mixstyle_alpha) if "layer4" in insert_after else None
 
-    def forward(self, x: torch.Tensor, return_features: bool = False):
+    def forward(
+        self,
+        x: torch.Tensor,
+        return_features: bool = False,
+        return_multiscale: bool = False,
+    ):
         x = self.backbone.conv1(x)
         x = self.backbone.bn1(x)
         x = self.backbone.relu(x)
@@ -111,24 +116,36 @@ class ResNet18MixStyle(nn.Module):
         x = self.backbone.layer1(x)
         if self.ms1 is not None:
             x = self.ms1(x)
+        l1_out = x
 
         x = self.backbone.layer2(x)
         if self.ms2 is not None:
             x = self.ms2(x)
+        l2_out = x
 
         x = self.backbone.layer3(x)
         if self.ms3 is not None:
             x = self.ms3(x)
+        l3_out = x
 
         x = self.backbone.layer4(x)
         if self.ms4 is not None:
             x = self.ms4(x)
+        l4_out = x
 
         x = self.backbone.avgpool(x)
         feats = torch.flatten(x, 1)
         logits = self.backbone.fc(feats)
-        
 
+        if return_multiscale:
+            inter = {
+                "layer1": l1_out,
+                "layer2": l2_out,
+                "layer3": l3_out,
+                "layer4": l4_out,
+                "feats": feats,
+            }
+            return logits, feats, inter
         if return_features:
             return logits, feats
         return logits

@@ -5,6 +5,14 @@ trained model by running dual forward passes (MixStyle ON vs OFF).
 
 Phase 2 — Training: add a KL-divergence consistency loss that penalizes
 the model when its predictions change under style perturbation.
+
+Phase 3 — Multi-scale: instead of (or in addition to) output-level KL,
+compute a feature-space distance (cosine or MSE) between the clean and
+mixed representations at several depths. Motivation: if MixStyle is
+inserted at layer2, the style perturbation propagates through layer3,
+layer4, and the pre-FC features — enforcing consistency at each stage
+tests whether intermediate-level consistency matters more than the
+logit-level signal that output-only methods (SHADE/CCFP) rely on.
 """
 
 from __future__ import annotations
@@ -164,3 +172,69 @@ def consistency_report(records: list[dict]) -> dict:
         "mean_kl": mean_kl,
         "mean_conf_delta": mean_conf_delta,
     }
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: Multi-scale feature-space consistency
+# ---------------------------------------------------------------------------
+_VALID_MS_KEYS = ("layer1", "layer2", "layer3", "layer4", "feats")
+
+
+def _gap(x: torch.Tensor) -> torch.Tensor:
+    """Spatially pool a feature map to (B, C). 2D tensors pass through."""
+    if x.ndim == 4:
+        return x.mean(dim=(2, 3))
+    if x.ndim == 2:
+        return x
+    return x.flatten(1)
+
+
+def multiscale_feature_consistency(
+    inter_mixed: dict,
+    inter_clean: dict,
+    layer_weights: dict,
+    distance: str = "cosine",
+    eps: float = 1e-8,
+) -> torch.Tensor:
+    """Weighted sum of feature-space distances between clean and mixed branches.
+
+    Clean features are assumed to be already detached (stop-gradient teacher).
+    Spatial maps are reduced via GAP so every layer contributes a (B, C) tensor.
+
+    Parameters
+    ----------
+    inter_mixed, inter_clean
+        Dicts keyed by "layer1".."layer4" and "feats" (from forward(..., return_multiscale=True)).
+    layer_weights
+        Dict mapping stage name → non-negative weight. Stages with weight 0 or
+        missing are skipped.
+    distance
+        "cosine" → 1 - cosine_sim (per-sample, averaged). Scale-invariant, only
+        direction is matched — a good default when we still want the mixed
+        branch to shift magnitude.
+        "mse" → mean squared error per channel. Penalises scale drift too.
+    """
+    if distance not in ("cosine", "mse"):
+        raise ValueError(f"unknown distance: {distance!r}")
+
+    total = inter_mixed[next(iter(layer_weights))].new_zeros(())
+    any_active = False
+    for key, w in layer_weights.items():
+        if w <= 0:
+            continue
+        if key not in _VALID_MS_KEYS:
+            raise ValueError(f"unknown stage {key!r}; expected one of {_VALID_MS_KEYS}")
+        fm = _gap(inter_mixed[key])
+        fc = _gap(inter_clean[key]).detach()
+        if distance == "cosine":
+            fm_n = F.normalize(fm, dim=1, eps=eps)
+            fc_n = F.normalize(fc, dim=1, eps=eps)
+            d = 1.0 - (fm_n * fc_n).sum(dim=1)
+        else:  # mse
+            d = (fm - fc).pow(2).mean(dim=1)
+        total = total + float(w) * d.mean()
+        any_active = True
+
+    if not any_active:
+        return inter_mixed["feats"].new_zeros(())
+    return total

@@ -23,6 +23,7 @@ from .training import (
     set_seed,
     train_epoch,
     train_epoch_consistency,
+    train_epoch_consistency_multiscale,
     train_epoch_mmd,
 )
 
@@ -112,8 +113,17 @@ class ModelConfig:
     mixstyle_p: float = 0.5
     mixstyle_a: float = 0.1
 
-    # KL consistency regularization
+    # KL consistency regularization (output-level)
     consistency_lambda: float = 0.0
+
+    # Multi-scale feature consistency (per-layer)
+    # If any weight is > 0, the multiscale training loop is used.
+    # Weights are given as a tuple of (stage_name, weight) pairs so the
+    # dataclass stays hashable. Valid stage names: layer1/layer2/layer3/layer4/feats.
+    multiscale_layer_weights: tuple[tuple[str, float], ...] = ()
+    multiscale_distance: str = "cosine"  # "cosine" | "mse"
+    # Optional output-level KL alongside feature-level terms (0 disables).
+    multiscale_logit_kl_lambda: float = 0.0
 
     # MMD regularization
     mmd_lambda: float = 0.0
@@ -180,12 +190,39 @@ def run_experiment(
 
     use_consistency = cfg.consistency_lambda > 0 and cfg.use_mixstyle
     use_mmd = cfg.mmd_lambda > 0 and cfg.use_mixstyle
+    ms_weights = {k: float(v) for k, v in cfg.multiscale_layer_weights if float(v) > 0}
+    use_multiscale = bool(ms_weights) and cfg.use_mixstyle
+
+    if sum([use_consistency, use_mmd, use_multiscale]) > 1:
+        raise ValueError(
+            "Use at most one of consistency_lambda / mmd_lambda / multiscale_layer_weights."
+        )
 
     for epoch in range(epochs):
-        if use_consistency and use_mmd:
-            raise ValueError("Use either consistency_lambda or mmd_lambda, not both at once.")
+        if use_multiscale:
+            train_loss, ce_loss, feat_loss, kl_loss, train_acc = (
+                train_epoch_consistency_multiscale(
+                    model,
+                    loaders["train_loader"],
+                    optimizer,
+                    criterion,
+                    layer_weights=ms_weights,
+                    distance=cfg.multiscale_distance,
+                    logit_kl_lambda=cfg.multiscale_logit_kl_lambda,
+                )
+            )
+            history.append({
+                "epoch": epoch + 1,
+                "train_loss": train_loss,
+                "ce_loss": ce_loss,
+                "feat_loss": feat_loss,
+                "kl_loss": kl_loss,
+                "train_acc": train_acc,
+                "val_acc": None,
+            })
+            extra = f" ce={ce_loss:.4f} feat={feat_loss:.4f} kl={kl_loss:.4f}"
 
-        if use_consistency:
+        elif use_consistency:
             train_loss, ce_loss, kl_loss, train_acc = train_epoch_consistency(
                 model,
                 loaders["train_loader"],
@@ -263,6 +300,9 @@ def run_experiment(
         "mixstyle_p": cfg.mixstyle_p,
         "mixstyle_a": cfg.mixstyle_a,
         "consistency_lambda": cfg.consistency_lambda,
+        "multiscale_layer_weights": list(cfg.multiscale_layer_weights),
+        "multiscale_distance": cfg.multiscale_distance,
+        "multiscale_logit_kl_lambda": cfg.multiscale_logit_kl_lambda,
         "mmd_lambda": cfg.mmd_lambda,
         "mmd_class_conditional": cfg.mmd_class_conditional,
         "data_config": data_cfg.name,

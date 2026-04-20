@@ -30,10 +30,12 @@ _LAZY_EXPORTS = {
     "set_all_mixstyle": (".consistency", "set_all_mixstyle"),
     "measure_consistency": (".consistency", "measure_consistency"),
     "consistency_report": (".consistency", "consistency_report"),
+    "multiscale_feature_consistency": (".consistency", "multiscale_feature_consistency"),
     # training
     "set_seed": (".training", "set_seed"),
     "train_epoch": (".training", "train_epoch"),
     "train_epoch_consistency": (".training", "train_epoch_consistency"),
+    "train_epoch_consistency_multiscale": (".training", "train_epoch_consistency_multiscale"),
     "eval_epoch": (".training", "eval_epoch"),
     "eval_metrics": (".training", "eval_metrics"),
     # experiment
@@ -83,10 +85,12 @@ __all__ = [
     "set_all_mixstyle",
     "measure_consistency",
     "consistency_report",
+    "multiscale_feature_consistency",
     # training
     "set_seed",
     "train_epoch",
     "train_epoch_consistency",
+    "train_epoch_consistency_multiscale",
     "eval_epoch",
     "eval_metrics",
     # experiment

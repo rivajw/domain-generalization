@@ -11,7 +11,7 @@ import torch.nn.functional as F
 from tqdm import tqdm
 
 from . import runtime
-from .consistency import set_all_mixstyle
+from .consistency import multiscale_feature_consistency, set_all_mixstyle
 from .mmd import compute_batch_mmd_loss, forward_with_features
 
 
@@ -116,6 +116,88 @@ def train_epoch_consistency(model, loader, optimizer, criterion, lambda_c: float
 
     n = len(loader)
     return total_loss / n, total_ce / n, total_kl / n, correct / total
+
+def train_epoch_consistency_multiscale(
+    model,
+    loader,
+    optimizer,
+    criterion,
+    layer_weights: dict,
+    distance: str = "cosine",
+    logit_kl_lambda: float = 0.0,
+):
+    """Training epoch with multi-scale feature-space consistency.
+
+    For each batch:
+    1. Clean forward pass (MixStyle OFF) → intermediate features at every stage.
+    2. Mixed forward pass (MixStyle ON) → intermediate features at every stage.
+    3. loss = CE(logits_mixed, y)
+             + Σ_l w_l · d(mixed_l, clean_l.detach())
+             + logit_kl_lambda · KL(mixed_softmax || clean_softmax.detach())   [optional]
+
+    The clean branch is treated as a stop-gradient teacher at every scale.
+
+    Returns
+    -------
+    (avg_loss, avg_ce_loss, avg_feat_loss, avg_kl_loss, accuracy)
+    """
+    device = runtime.DEVICE
+    use_amp = runtime.USE_AMP
+
+    model.train()
+    total_loss = 0.0
+    total_ce = 0.0
+    total_feat = 0.0
+    total_kl = 0.0
+    correct = 0
+    total = 0
+
+    for x, y, site, case_id in tqdm(loader):
+        x = x.to(device, non_blocking=True)
+        y = y.to(device, non_blocking=True)
+
+        # --- clean pass (no MixStyle) — captures teacher features at every stage ---
+        set_all_mixstyle(model, False)
+        with torch.no_grad():
+            with torch.autocast(device_type=device.type, enabled=use_amp):
+                logits_clean, _, inter_clean = model(x, return_multiscale=True)
+        prob_clean = F.softmax(logits_clean, dim=1).detach()
+        inter_clean = {k: v.detach() for k, v in inter_clean.items()}
+
+        # --- mixed pass (MixStyle ON) ---
+        set_all_mixstyle(model, True)
+        optimizer.zero_grad(set_to_none=True)
+        with torch.autocast(device_type=device.type, enabled=use_amp):
+            logits_mixed, _, inter_mixed = model(x, return_multiscale=True)
+            ce_loss = criterion(logits_mixed, y)
+
+            feat_loss = multiscale_feature_consistency(
+                inter_mixed, inter_clean, layer_weights, distance=distance
+            )
+
+            loss = ce_loss + feat_loss
+            if logit_kl_lambda > 0:
+                log_prob_mixed = F.log_softmax(logits_mixed, dim=1)
+                kl_loss = F.kl_div(log_prob_mixed, prob_clean, reduction="batchmean")
+                loss = loss + logit_kl_lambda * kl_loss
+            else:
+                kl_loss = torch.zeros((), device=device)
+
+        runtime.scaler.scale(loss).backward()
+        runtime.scaler.step(optimizer)
+        runtime.scaler.update()
+
+        total_loss += loss.item()
+        total_ce += ce_loss.item()
+        total_feat += float(feat_loss.item()) if torch.is_tensor(feat_loss) else float(feat_loss)
+        total_kl += float(kl_loss.item())
+        preds = logits_mixed.argmax(dim=1)
+        correct += (preds == y).sum().item()
+        total += y.size(0)
+
+    n = len(loader)
+    return total_loss / n, total_ce / n, total_feat / n, total_kl / n, correct / total
+
 
 def train_epoch_mmd(
     model,
