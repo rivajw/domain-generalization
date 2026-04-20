@@ -205,3 +205,7 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+/artifacts
+/brats23_npz_dg
+asnr-miccai-brats2023-gli-challenge-trainingdata.zip
+BraTS2023_2017_GLI_Mapping.xlsx
