@@ -23,6 +23,7 @@ from .training import (
     set_seed,
     train_epoch,
     train_epoch_consistency,
+    train_epoch_consistency_mmd,
     train_epoch_consistency_multiscale,
     train_epoch_mmd,
 )
@@ -193,9 +194,15 @@ def run_experiment(
     ms_weights = {k: float(v) for k, v in cfg.multiscale_layer_weights if float(v) > 0}
     use_multiscale = bool(ms_weights) and cfg.use_mixstyle
 
-    if sum([use_consistency, use_mmd, use_multiscale]) > 1:
+    # KL + MMD combined uses the dedicated train_epoch_consistency_mmd loop.
+    # Multiscale stays mutually exclusive with the other two regularizers
+    # because the multiscale loop captures intermediate features that the
+    # MMD/consistency loops do not return.
+    use_consist_mmd = use_consistency and use_mmd
+    if use_multiscale and (use_consistency or use_mmd):
         raise ValueError(
-            "Use at most one of consistency_lambda / mmd_lambda / multiscale_layer_weights."
+            "multiscale_layer_weights cannot be combined with consistency_lambda "
+            "or mmd_lambda; choose one regularizer family."
         )
 
     for epoch in range(epochs):
@@ -221,6 +228,31 @@ def run_experiment(
                 "val_acc": None,
             })
             extra = f" ce={ce_loss:.4f} feat={feat_loss:.4f} kl={kl_loss:.4f}"
+
+        elif use_consist_mmd:
+            train_loss, ce_loss, kl_loss, mmd_loss, train_acc = (
+                train_epoch_consistency_mmd(
+                    model,
+                    loaders["train_loader"],
+                    optimizer,
+                    criterion,
+                    lambda_c=cfg.consistency_lambda,
+                    lambda_mmd=cfg.mmd_lambda,
+                    class_conditional=cfg.mmd_class_conditional,
+                    sigma_list=cfg.mmd_sigma_list,
+                    max_samples=cfg.mmd_max_samples,
+                )
+            )
+            history.append({
+                "epoch": epoch + 1,
+                "train_loss": train_loss,
+                "ce_loss": ce_loss,
+                "kl_loss": kl_loss,
+                "mmd_loss": mmd_loss,
+                "train_acc": train_acc,
+                "val_acc": None,
+            })
+            extra = f" ce={ce_loss:.4f} kl={kl_loss:.4f} mmd={mmd_loss:.4f}"
 
         elif use_consistency:
             train_loss, ce_loss, kl_loss, train_acc = train_epoch_consistency(

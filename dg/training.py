@@ -275,6 +275,113 @@ def train_epoch_mmd(
     return total_loss / n, total_ce / n, total_mmd / n, correct / total
 
 
+def train_epoch_consistency_mmd(
+    model,
+    loader,
+    optimizer,
+    criterion,
+    lambda_c: float = 0.1,
+    lambda_mmd: float = 0.1,
+    class_conditional: bool = True,
+    sigma_list: tuple[float, ...] = (1.0, 5.0, 10.0),
+    max_samples: int | None = 256,
+):
+    """Training epoch with both consistency (output KL) and MMD regularization.
+
+    For each batch:
+    1. Clean forward pass (MixStyle OFF) → logits_clean (detached teacher).
+    2. Mixed forward pass (MixStyle ON)  → logits_mixed + feats_mixed.
+    3. loss = CE(logits_mixed, y)
+            + lambda_c   * KL(p_mixed || p_clean.detach())
+            + lambda_mmd * MMD(feats_mixed across sites)
+
+    Returns
+    -------
+    (avg_loss, avg_ce_loss, avg_kl_loss, avg_mmd_loss, accuracy)
+
+    Notes
+    -----
+    Ported from the historical ``final_tl_experiments`` branch so the
+    full 2×4 hypothesis-test matrix (MixStyle strength × regularizer
+    family) can run on the multiscale branch in a single notebook.
+    """
+    device = runtime.DEVICE
+    use_amp = runtime.USE_AMP
+
+    model.train()
+    total_loss = 0.0
+    total_ce = 0.0
+    total_kl = 0.0
+    total_mmd = 0.0
+    correct = 0
+    total = 0
+
+    for x, y, site, case_id in tqdm(loader):
+        x = x.to(device, non_blocking=True)
+        y = y.to(device, non_blocking=True)
+        site = site.to(device, non_blocking=True)
+
+        # --- clean pass (no MixStyle) ---
+        set_all_mixstyle(model, False)
+        with torch.no_grad():
+            with torch.autocast(device_type=device.type, enabled=use_amp):
+                logits_clean = model(x)
+        prob_clean = F.softmax(logits_clean, dim=1).detach()
+
+        # --- mixed pass (MixStyle ON) ---
+        set_all_mixstyle(model, True)
+        optimizer.zero_grad(set_to_none=True)
+
+        with torch.autocast(device_type=device.type, enabled=use_amp):
+            logits_mixed, feats_mixed = forward_with_features(model, x)
+
+            if torch.isnan(logits_mixed).any() or torch.isinf(logits_mixed).any():
+                print("LOGITS NAN/INF")
+                continue
+            if torch.isnan(feats_mixed).any() or torch.isinf(feats_mixed).any():
+                print("FEATURES NAN/INF")
+                continue
+
+            ce_loss = criterion(logits_mixed, y)
+
+            log_prob_mixed = F.log_softmax(logits_mixed, dim=1)
+            kl_loss = F.kl_div(log_prob_mixed, prob_clean, reduction="batchmean")
+
+            mmd_loss = compute_batch_mmd_loss(
+                feats_mixed,
+                site,
+                labels=y,
+                class_conditional=class_conditional,
+                sigma_list=sigma_list,
+                max_samples=max_samples,
+            )
+
+            loss = ce_loss + lambda_c * kl_loss + lambda_mmd * mmd_loss
+
+        if torch.isnan(loss) or torch.isinf(loss):
+            print(
+                f"LOSS IS NAN/INF — ce={ce_loss.item():.4f} "
+                f"kl={kl_loss.item():.4f} mmd={mmd_loss.item():.4f}"
+            )
+            continue
+
+        runtime.scaler.scale(loss).backward()
+        runtime.scaler.step(optimizer)
+        runtime.scaler.update()
+
+        total_loss += loss.item()
+        total_ce += ce_loss.item()
+        total_kl += kl_loss.item()
+        total_mmd += mmd_loss.item()
+
+        preds = logits_mixed.argmax(dim=1)
+        correct += (preds == y).sum().item()
+        total += y.size(0)
+
+    n = len(loader)
+    return total_loss / n, total_ce / n, total_kl / n, total_mmd / n, correct / total
+
+
 @torch.inference_mode()
 def eval_epoch(model, loader):
     """Run one eval epoch and return accuracy."""
