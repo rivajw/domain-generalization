@@ -1,0 +1,11 @@
+# Install CUDA-enabled torch & torchvision first, using the AWS AMI or PyTorch selector.
+# The following are additional project dependencies.
+numpy
+pandas
+scikit-learn
+pillow
+tqdm
+matplotlib
+nibabel
+openpyxl
+synapseclient

@@ -209,3 +209,63 @@ __marimo__/
 /brats23_npz_dg
 asnr-miccai-brats2023-gli-challenge-trainingdata.zip
 BraTS2023_2017_GLI_Mapping.xlsx
+
+# ===============================
+# BraTS2023 datasets
+# ===============================
+/brats23_dg_png/
+/brats23_npz_dg/
+/datasets/
+/raw_data/
+/processed_data/
+
+# Medical images and arrays
+*.nii
+*.nii.gz
+*.npz
+*.npy
+*.dcm
+*.dicom
+*.h5
+*.hdf5
+
+# Dataset archives and mapping files
+asnr-miccai-brats2023-gli-challenge-trainingdata.zip
+BraTS2023_2017_GLI_Mapping.xlsx
+
+# ===============================
+# Training outputs
+# ===============================
+/artifacts/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.onnx
+*.pkl
+*.pickle
+*.log
+*.state
+*.exit
+*.pid
+
+# Downloaded archives
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.7z
+*.rar
+
+# Credentials and local configuration
+.env
+.env.*
+!.env.example
+.aws/
+*.pem
+*.key
+secrets.json
+credentials.json
+
+# Local system files
+.DS_Store
